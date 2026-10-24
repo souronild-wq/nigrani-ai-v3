@@ -36,3 +36,4 @@ python test_duplicates.py
 
 ## Important
 This project uses synthetic demo data. Flagged transactions require manual review and are not proof of fraud.
+open-https://nigrani-ai-v3.streamlit.app/
