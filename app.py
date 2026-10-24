@@ -6,6 +6,7 @@ import streamlit as st
 
 from detector import analyze_transaction
 from bulk_audit import audit_csv
+from trustcheck import check_invoice
 
 
 # ==================================================
@@ -1001,6 +1002,171 @@ elif page == "Supplier Analytics":
             "not proof of supplier misconduct."
         )
 
+
+# ==================================================
+# TRUSTCHECK INVOICE VERIFICATION
+# ==================================================
+
+elif page == "TrustCheck":
+    show_header(
+        "TrustCheck",
+        "Verify invoice details and understand why an invoice "
+        "may need further review.",
+    )
+
+    st.info(
+        "TrustCheck uses rule-based checks. Its score indicates "
+        "review priority, not the probability of fraud."
+    )
+
+    with st.form("trustcheck_invoice_form"):
+        st.subheader("Invoice Details")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            invoice_id = st.text_input(
+                "Invoice ID",
+                value="INV-TEST-001",
+            )
+
+            supplier = st.text_input(
+                "Supplier",
+                value="ABC Suppliers",
+            )
+
+            material = st.text_input(
+                "Material",
+                value="Steel",
+            )
+
+            quantity = st.number_input(
+                "Quantity",
+                min_value=1,
+                value=10,
+                step=1,
+            )
+
+        with col2:
+            unit_price = st.number_input(
+                "Unit Price (₹)",
+                min_value=0.01,
+                value=100.0,
+                step=10.0,
+            )
+
+            market_price = st.number_input(
+                "Reference Market Price (₹)",
+                min_value=0.01,
+                value=100.0,
+                step=10.0,
+            )
+
+            budget = st.number_input(
+                "Approved Budget (₹)",
+                min_value=0.01,
+                value=1500.0,
+                step=100.0,
+            )
+
+            claimed_total = st.number_input(
+                "Claimed Invoice Total (₹)",
+                min_value=0.0,
+                value=1000.0,
+                step=100.0,
+            )
+
+        submitted = st.form_submit_button(
+            "Run TrustCheck",
+            use_container_width=True,
+        )
+
+    if submitted:
+        result = check_invoice(
+            quantity=quantity,
+            unit_price=unit_price,
+            market_price=market_price,
+            budget=budget,
+            claimed_total=claimed_total,
+            invoice_id=invoice_id,
+            supplier=supplier,
+            material=material,
+        )
+
+        st.divider()
+        st.subheader("TrustCheck Results")
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric(
+            "Review Priority Score",
+            f"{result['trust_score']}/100",
+        )
+
+        col2.metric(
+            "Verification Status",
+            result["status"],
+        )
+
+        col3.metric(
+            "Review Required",
+            "Yes" if result["review_required"] else "No",
+        )
+
+        st.progress(result["trust_score"] / 100)
+
+        if result["status"] == "Invalid Data":
+            st.error("Invalid invoice data. Please review the inputs.")
+        elif result["trust_score"] >= 60:
+            st.error("High review priority. Investigate this invoice.")
+        elif result["review_required"]:
+            st.warning("Some checks failed. Further review is recommended.")
+        else:
+            st.success("The invoice passed the configured basic checks.")
+
+        st.subheader("Checks Passed")
+
+        if result["checks_passed"]:
+            for check in result["checks_passed"]:
+                st.write(f"✅ {check}")
+        else:
+            st.write("No checks passed.")
+
+        st.subheader("Findings")
+
+        if result["findings"]:
+            for finding in result["findings"]:
+                st.warning(
+                    f"**{finding['severity']} severity:** "
+                    f"{finding['reason']}"
+                )
+        else:
+            st.success("No configured TrustCheck findings.")
+
+        if "expected_total" in result:
+            st.subheader("Financial Summary")
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Expected Total",
+                money(result["expected_total"]),
+            )
+
+            col2.metric(
+                "Claimed Total",
+                money(result["claimed_total"]),
+            )
+
+            col3.metric(
+                "Price Difference",
+                money(result["price_difference"]),
+            )
+
+        st.caption(
+            "TrustCheck identifies potential irregularities. "
+            "A human reviewer must determine the appropriate action."
+        )
 
 # ==================================================
 # FOOTER
