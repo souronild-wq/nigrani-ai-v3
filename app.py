@@ -1,1183 +1,840 @@
 
-import io
+import re
+from urllib.parse import urlparse
 
 import pandas as pd
 import streamlit as st
 
-from detector import analyze_transaction
-from bulk_audit import audit_csv
-from trustcheck import check_invoice
 
-
-# ==================================================
-# PAGE CONFIGURATION
-# ==================================================
+# ============================================================
+# NIGRANI AI - FRAUD DETECTION AND WEBSITE SAFETY PLATFORM
+# ============================================================
 
 st.set_page_config(
-    page_title="Nigrani AI | Risk Intelligence",
-    page_icon="🔎",
+    page_title="Nigrani AI",
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# ------------------------------------------------------------
+# SESSION STATE
+# ------------------------------------------------------------
 
-# ==================================================
-# PROFESSIONAL DARK THEME
-# ==================================================
-
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background-color: #0b1120;
-        color: #e5eaf5;
-    }
-
-    [data-testid="stSidebar"] {
-        background-color: #101a2e;
-        border-right: 1px solid #273750;
-    }
-
-    h1, h2, h3 {
-        color: #f1f5f9;
-    }
-
-    p, label {
-        color: #c3cee0;
-    }
-
-    [data-testid="stMetric"] {
-        background-color: #131f33;
-        border: 1px solid #273750;
-        border-radius: 12px;
-        padding: 18px;
-    }
-
-    [data-testid="stMetricLabel"] {
-        color: #9eafc9;
-    }
-
-    [data-testid="stMetricValue"] {
-        color: #f1f5f9;
-    }
-
-    div.stButton > button,
-    div.stDownloadButton > button {
-        background-color: #087f8c;
-        color: white;
-        border: 1px solid #1597a5;
-        border-radius: 8px;
-        font-weight: 600;
-    }
-
-    div.stButton > button:hover,
-    div.stDownloadButton > button:hover {
-        background-color: #096875;
-        color: white;
-    }
-
-    .brand {
-        font-size: 25px;
-        font-weight: 800;
-        color: #f1f5f9;
-    }
-
-    .subtitle {
-        color: #8fa3c0;
-        font-size: 14px;
-    }
-
-    .section-label {
-        color: #35c6d3;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 2px;
-        text-transform: uppercase;
-    }
-
-    .notice {
-        background-color: #17243a;
-        border: 1px solid #344761;
-        border-left: 4px solid #35c6d3;
-        padding: 13px 16px;
-        border-radius: 7px;
-        color: #cbd7e8;
-        font-size: 13px;
-    }
-
-    .footer {
-        color: #7586a1;
-        font-size: 12px;
-        text-align: center;
-        padding-top: 25px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+for key in ["expense_claims", "bill_records", "audit_history"]:
+    if key not in st.session_state:
+        st.session_state[key] = []
 
 
-# ==================================================
-# GENERAL HELPERS
-# ==================================================
+# ------------------------------------------------------------
+# COMMON FUNCTIONS
+# ------------------------------------------------------------
 
 def money(value):
-    """Format a number as Indian rupees."""
-    try:
-        return f"₹{float(value):,.2f}"
-    except (ValueError, TypeError):
-        return "N/A"
+    return f"₹{value:,.2f}"
 
 
 def show_header(title, description):
-    st.markdown(
-        '<div class="section-label">'
-        'NIGRANI AI / RISK INTELLIGENCE'
-        '</div>',
-        unsafe_allow_html=True,
-    )
     st.title(title)
-    st.markdown(
-        f'<div class="subtitle">{description}</div>',
-        unsafe_allow_html=True,
-    )
+    st.caption(description)
     st.divider()
 
 
-def risk_color(level):
-    colors = {
-        "Critical": "#ff6b81",
-        "High": "#ff9f43",
-        "Moderate": "#feca57",
-        "Low": "#4adeb0",
-    }
-    return colors.get(level, "#c3cee0")
+def show_result(score, findings, passed_message="No configured warning detected."):
+    score = max(0, min(100, int(score)))
 
-
-# ==================================================
-# SINGLE-INVOICE RISK DISPLAY
-# ==================================================
-
-def show_risk_assessment(result):
-    score = int(result["risk_score"])
-    level = result["risk_level"]
-
-    st.subheader("Invoice Risk Assessment")
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Risk Score", f"{score}/100")
-    col2.metric("Risk Level", level)
-    col3.metric(
-        "Review Required",
-        "Yes" if result["review_needed"] else "No",
+    c1, c2 = st.columns(2)
+    c1.metric("Review Score", f"{score}/100")
+    c2.metric(
+        "Review Status",
+        "High Priority" if score >= 60
+        else "Needs Review" if score >= 30
+        else "Basic Checks Passed",
     )
 
     st.progress(score / 100)
 
-    st.markdown(
-        f"**Risk category:** "
-        f"<span style='color:{risk_color(level)}'>"
-        f"{level}</span>",
-        unsafe_allow_html=True,
-    )
+    if findings:
+        st.subheader("Findings")
+        for finding in findings:
+            st.warning(finding)
+    else:
+        st.success(passed_message)
 
     st.caption(
-        "The score indicates review priority, not the probability "
-        "of fraud."
+        "This tool identifies potential warning signs. "
+        "It does not prove fraud or guarantee authenticity."
     )
 
-    st.markdown("#### Explainable Risk Factors")
 
-    factors = result.get("risk_factors", [])
+def calculate_invoice(quantity, unit_price, market_price, budget, claimed_total):
+    findings = []
+    score = 0
 
-    if factors:
-        for factor in factors:
-            with st.container(border=True):
-                left, right = st.columns([3, 1])
+    expected_total = quantity * unit_price
+    price_difference = claimed_total - expected_total
 
-                with left:
-                    st.markdown(f"**{factor['factor']}**")
-                    st.write(factor["reason"])
+    if quantity <= 0:
+        findings.append("Quantity must be greater than zero.")
+        score += 40
 
-                with right:
-                    st.metric("Points", f"+{factor['points']}")
-    else:
-        st.success("No configured risk factors were triggered.")
+    if unit_price <= 0 or market_price <= 0:
+        findings.append("Unit price and market price must be positive.")
+        score += 40
+
+    if budget <= 0:
+        findings.append("Approved budget must be greater than zero.")
+        score += 30
+
+    if claimed_total < 0:
+        findings.append("Claimed total cannot be negative.")
+        score += 40
+
+    if not findings:
+        if abs(price_difference) > 0.01:
+            findings.append(
+                f"Claimed total differs from the calculated total by "
+                f"{money(price_difference)}."
+            )
+            score += 30
+
+        if unit_price > market_price * 1.20:
+            findings.append(
+                "Unit price is more than 20% above the supplied market price."
+            )
+            score += 30
+
+        if claimed_total > budget:
+            findings.append("Claimed total exceeds the approved budget.")
+            score += 30
+
+    return {
+        "expected_total": expected_total,
+        "price_difference": price_difference,
+        "findings": findings,
+        "score": min(score, 100),
+    }
 
 
-# ==================================================
-# BULK RISK SCORING
-# ==================================================
+def record_audit(module, reference, score, findings):
+    st.session_state.audit_history.append({
+        "Module": module,
+        "Reference": reference,
+        "Score": score,
+        "Status": (
+            "High Priority" if score >= 60
+            else "Needs Review" if score >= 30
+            else "Basic Checks Passed"
+        ),
+        "Findings": "; ".join(findings) if findings else "None",
+    })
 
-def add_risk_scores(report):
-    """Calculate risk scores for each invoice in a CSV report."""
 
-    report = report.copy()
+# ------------------------------------------------------------
+# WEBSITE SAFETY CHECK
+# ------------------------------------------------------------
 
-    required_columns = [
-        "quantity",
-        "unit_price",
-        "market_price",
-        "budget",
-        "total_amount",
+def check_website(raw_url):
+    findings = []
+    score = 0
+    raw_url = raw_url.strip()
+
+    if not raw_url:
+        return 100, ["Enter a website address to check."]
+
+    if any(ord(char) < 32 or char.isspace() for char in raw_url):
+        return 100, ["The URL contains spaces or control characters."]
+
+    candidate = raw_url
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+
+    try:
+        parsed = urlparse(candidate)
+        hostname = parsed.hostname
+    except ValueError:
+        return 100, ["The URL could not be parsed."]
+
+    if parsed.scheme not in ("http", "https"):
+        findings.append("The URL does not use HTTP or HTTPS.")
+        score += 50
+
+    if not hostname or "." not in hostname:
+        findings.append("The address does not look like a complete domain.")
+        score += 40
+        return min(score, 100), findings
+
+    if parsed.username is not None or parsed.password is not None:
+        findings.append("The URL contains credentials before the hostname.")
+        score += 40
+
+    if parsed.scheme == "http":
+        findings.append("The connection uses HTTP rather than encrypted HTTPS.")
+        score += 20
+
+    if hostname.replace(".", "").isdigit():
+        findings.append("The hostname appears to be an IP address.")
+        score += 20
+
+    if "xn--" in hostname.lower():
+        findings.append("The domain contains an internationalized domain label.")
+        score += 20
+
+    suspicious_terms = [
+        "login", "verify", "secure", "account",
+        "update", "password", "wallet", "confirm",
     ]
-
-    missing = [
-        column
-        for column in required_columns
-        if column not in report.columns
-    ]
-
-    if missing:
-        st.warning(
-            "Some risk scores cannot be calculated. Missing columns: "
-            + ", ".join(missing)
+    if any(term in hostname.lower() for term in suspicious_terms):
+        findings.append(
+            "The hostname contains a term commonly used in account-related URLs."
         )
-        return report
+        score += 15
 
-    scores = []
-    levels = []
-    explanations = []
-    ml_flags = []
+    if hostname.count("-") >= 3:
+        findings.append("The hostname contains several hyphens.")
+        score += 15
 
-    for _, row in report.iterrows():
-        try:
-            result = analyze_transaction(
-                quantity=float(row["quantity"]),
-                unit_price=float(row["unit_price"]),
-                market_price=float(row["market_price"]),
-                budget=float(row["budget"]),
-                claimed_total=float(row["total_amount"]),
-            )
+    if len(hostname) > 50:
+        findings.append("The hostname is unusually long.")
+        score += 10
 
-            scores.append(result["risk_score"])
-            levels.append(result["risk_level"])
-            ml_flags.append(result["ml_anomaly"])
+    if parsed.port is not None and parsed.port not in (80, 443):
+        findings.append("The URL uses a non-standard web port.")
+        score += 10
 
-            factors = result.get("risk_factors", [])
+    return min(score, 100), findings
 
-            explanations.append(
-                "; ".join(
-                    f"{factor['factor']} (+{factor['points']})"
-                    for factor in factors
-                )
-                if factors
-                else "No configured risk factors"
-            )
 
-        except (ValueError, TypeError, KeyError):
-            scores.append(None)
-            levels.append("Not scored")
-            ml_flags.append(False)
-            explanations.append("Invalid or incomplete invoice data")
-
-    report["risk_score"] = scores
-    report["risk_level"] = levels
-    report["ml_anomaly"] = ml_flags
-    report["risk_explanation"] = explanations
-
-    return report
-
-
-# ==================================================
-# REPORT METRICS AND CHARTS
-# ==================================================
-
-def show_report_metrics(report):
-    total = len(report)
-
-    if "risk_score" in report.columns:
-        scores = pd.to_numeric(
-            report["risk_score"],
-            errors="coerce",
-        )
-    else:
-        scores = pd.Series(
-            [float("nan")] * total,
-            index=report.index,
-        )
-
-    flagged = int((scores >= 25).sum())
-    critical = int((scores >= 75).sum())
-    average = scores.mean()
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric("Total Invoices", total)
-    col2.metric("Invoices to Review", flagged)
-    col3.metric("Critical Risk", critical)
-    col4.metric(
-        "Average Risk Score",
-        f"{average:.1f}/100" if pd.notna(average) else "N/A",
-    )
-
-
-def show_risk_chart(report):
-    if "risk_level" not in report.columns:
-        return
-
-    st.subheader("Risk Distribution")
-
-    order = [
-        "Critical",
-        "High",
-        "Moderate",
-        "Low",
-        "Not scored",
-    ]
-
-    counts = (
-        report["risk_level"]
-        .value_counts()
-        .reindex(order, fill_value=0)
-    )
-
-    counts = counts[counts > 0]
-
-    if not counts.empty:
-        chart_data = counts.rename_axis(
-            "Risk Level"
-        ).reset_index(name="Invoices")
-
-        st.bar_chart(
-            chart_data,
-            x="Risk Level",
-            y="Invoices",
-        )
-
-
-# ==================================================
-# AUDIT TABLE AND CSV EXPORT
-# ==================================================
-
-def show_report_table(report, key_prefix="report"):
-    st.subheader("Invoice Review Table")
-
-    display_report = report.copy()
-
-    if "risk_score" in display_report.columns:
-        display_report["risk_score"] = pd.to_numeric(
-            display_report["risk_score"],
-            errors="coerce",
-        )
-
-        display_report = display_report.sort_values(
-            "risk_score",
-            ascending=False,
-            na_position="last",
-        )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        flagged_only = st.checkbox(
-            "Show invoices requiring attention",
-            key=f"{key_prefix}_flagged",
-        )
-
-    with col2:
-        search = st.text_input(
-            "Search invoice or supplier",
-            key=f"{key_prefix}_search",
-        )
-
-    if flagged_only and "risk_score" in display_report.columns:
-        display_report = display_report[
-            display_report["risk_score"] >= 25
-        ]
-
-    if search:
-        matches = display_report.astype(str).apply(
-            lambda column: column.str.contains(
-                search,
-                case=False,
-                na=False,
-            )
-        )
-        display_report = display_report[matches.any(axis=1)]
-
-    st.dataframe(
-        display_report,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.download_button(
-        "Download Audit CSV",
-        data=display_report.to_csv(
-            index=False
-        ).encode("utf-8"),
-        file_name="nigrani_risk_audit_report.csv",
-        mime="text/csv",
-        key=f"{key_prefix}_csv_download",
-    )
-
-
-# ==================================================
-# EXCEL REPORT GENERATOR
-# ==================================================
-
-def create_excel_report(report):
-    """Generate an Excel workbook containing four audit sheets."""
-
-    data = report.copy()
-
-    # Ensure risk columns exist.
-    if "risk_score" in data.columns:
-        data["risk_score"] = pd.to_numeric(
-            data["risk_score"],
-            errors="coerce",
-        )
-    else:
-        data["risk_score"] = 0
-
-    if "risk_level" not in data.columns:
-        data["risk_level"] = "Not scored"
-
-    # Convert financial amounts safely.
-    if "total_amount" in data.columns:
-        data["total_amount"] = pd.to_numeric(
-            data["total_amount"],
-            errors="coerce",
-        )
-
-    # Overall audit summary.
-    total_value = (
-        data["total_amount"].sum()
-        if "total_amount" in data.columns
-        else 0
-    )
-
-    average_score = data["risk_score"].mean()
-
-    summary = pd.DataFrame(
-        {
-            "Metric": [
-                "Report Type",
-                "Total Invoices",
-                "Invoices Requiring Review",
-                "Critical-Risk Invoices",
-                "Total Invoice Value",
-                "Average Risk Score",
-                "Risk Score Review Threshold",
-            ],
-            "Value": [
-                "Nigrani AI Procurement Audit",
-                len(data),
-                int((data["risk_score"] >= 25).sum()),
-                int((data["risk_score"] >= 75).sum()),
-                total_value,
-                (
-                    round(average_score, 2)
-                    if pd.notna(average_score)
-                    else "N/A"
-                ),
-                25,
-            ],
-        }
-    )
-
-    # Risk-level breakdown.
-    risk_summary = (
-        data["risk_level"]
-        .value_counts()
-        .rename_axis("Risk Level")
-        .reset_index(name="Invoice Count")
-    )
-
-    # Supplier analysis.
-    if "supplier" in data.columns:
-        supplier_summary = (
-            data.groupby("supplier", dropna=False)
-            .agg(
-                Invoice_Count=("supplier", "size"),
-                Average_Risk=("risk_score", "mean"),
-                Highest_Risk=("risk_score", "max"),
-            )
-            .reset_index()
-        )
-
-        if "total_amount" in data.columns:
-            spending = (
-                data.groupby("supplier", dropna=False)
-                .agg(
-                    Total_Spending=("total_amount", "sum")
-                )
-                .reset_index()
-            )
-
-            supplier_summary = supplier_summary.merge(
-                spending,
-                on="supplier",
-                how="left",
-            )
-
-        supplier_summary["Average_Risk"] = (
-            supplier_summary["Average_Risk"].round(1)
-        )
-    else:
-        supplier_summary = pd.DataFrame(
-            {
-                "Message": [
-                    "Supplier data is unavailable in this report."
-                ]
-            }
-        )
-
-    # Generate workbook in memory.
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(
-        output,
-        engine="openpyxl",
-    ) as writer:
-        summary.to_excel(
-            writer,
-            sheet_name="Audit Summary",
-            index=False,
-        )
-
-        data.to_excel(
-            writer,
-            sheet_name="Invoice Details",
-            index=False,
-        )
-
-        risk_summary.to_excel(
-            writer,
-            sheet_name="Risk Breakdown",
-            index=False,
-        )
-
-        supplier_summary.to_excel(
-            writer,
-            sheet_name="Supplier Analysis",
-            index=False,
-        )
-
-        # Basic professional formatting.
-        for worksheet in writer.sheets.values():
-            worksheet.freeze_panes = "A2"
-            worksheet.auto_filter.ref = worksheet.dimensions
-
-            for cell in worksheet[1]:
-                cell.font = cell.font.copy(
-                    bold=True,
-                    color="FFFFFF",
-                )
-                cell.fill = cell.fill.copy(
-                    fill_type="solid",
-                    fgColor="17365D",
-                )
-
-            for column_cells in worksheet.columns:
-                max_length = 0
-                column_letter = column_cells[0].column_letter
-
-                for cell in column_cells:
-                    value = str(cell.value or "")
-                    max_length = max(max_length, len(value))
-
-                worksheet.column_dimensions[
-                    column_letter
-                ].width = min(max_length + 3, 40)
-
-    output.seek(0)
-    return output.getvalue()
-
-
-def save_report(report):
-    st.session_state["nigrani_report"] = report
-
-
-# ==================================================
+# ============================================================
 # SIDEBAR NAVIGATION
-# ==================================================
+# ============================================================
 
 with st.sidebar:
-    st.markdown(
-        '<div class="brand">🔎 NIGRANI AI</div>',
-        unsafe_allow_html=True,
-    )
-
-    st.caption("Procurement Risk Intelligence")
-    st.divider()
+    st.title("🛡️ Nigrani AI")
+    st.caption("Fraud Detection & Digital Safety")
 
     page = st.radio(
-        "WORKSPACE",
+        "Navigation",
         [
             "Dashboard",
             "Single Invoice",
+            "TrustCheck",
+            "Expense Fraud Detector",
+            "Fake Bill Detector",
+            "Website Safety",
             "Bulk Audit",
             "Supplier Analytics",
         ],
     )
 
     st.divider()
-    st.markdown("**SYSTEM STATUS**")
-    st.success("Risk engine configured")
-    st.success("ML model integration configured")
-
-    st.caption(
-        "Audit findings require human review."
-    )
+    st.caption("Rule-based checks • Human review recommended")
 
 
-# ==================================================
-# DASHBOARD
-# ==================================================
+# ============================================================
+# 1. DASHBOARD
+# ============================================================
 
 if page == "Dashboard":
     show_header(
-        "Audit Dashboard",
-        "Monitor invoice risks and prioritize procurement reviews.",
+        "Nigrani AI Dashboard",
+        "Your central workspace for invoice auditing, expense checks, "
+        "bill verification and website safety.",
     )
 
-    st.markdown(
-        '<div class="notice">'
-        "Run a bulk audit to see invoice statistics, risk levels, "
-        "and downloadable reports."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    report = st.session_state.get("nigrani_report")
-
-    if report is None:
-        st.info(
-            "No audit report available yet. "
-            "Open Bulk Audit and upload a CSV file."
-        )
-    else:
-        show_report_metrics(report)
-        show_risk_chart(report)
-        show_report_table(report, "dashboard")
-
-
-# ==================================================
-# SINGLE INVOICE ANALYSIS
-# ==================================================
-
-elif page == "Single Invoice":
-    show_header(
-        "Single Invoice Analysis",
-        "Evaluate one invoice using configured rules and the ML model.",
-    )
-
-    with st.form("single_invoice_form"):
-        st.subheader("Invoice Details")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            quantity = st.number_input(
-                "Quantity",
-                min_value=1,
-                value=100,
-                step=1,
-            )
-
-            unit_price = st.number_input(
-                "Unit Price (₹)",
-                min_value=0.01,
-                value=900.0,
-                step=10.0,
-            )
-
-            market_price = st.number_input(
-                "Reference Market Price (₹)",
-                min_value=0.01,
-                value=400.0,
-                step=10.0,
-            )
-
-        with col2:
-            budget = st.number_input(
-                "Approved Budget (₹)",
-                min_value=0.01,
-                value=50000.0,
-                step=1000.0,
-            )
-
-            claimed_total = st.number_input(
-                "Claimed Invoice Total (₹)",
-                min_value=0.01,
-                value=90000.0,
-                step=1000.0,
-            )
-
-        submitted = st.form_submit_button(
-            "Analyze Invoice",
-            use_container_width=True,
-        )
-
-    if submitted:
-        try:
-            result = analyze_transaction(
-                quantity=quantity,
-                unit_price=unit_price,
-                market_price=market_price,
-                budget=budget,
-                claimed_total=claimed_total,
-            )
-
-            st.divider()
-            show_risk_assessment(result)
-
-            st.subheader("Financial Summary")
-
-            col1, col2, col3 = st.columns(3)
-
-            col1.metric(
-                "Expected Total",
-                money(result["expected_total"]),
-            )
-
-            col2.metric(
-                "Price Difference vs Reference",
-                money(result["price_difference"]),
-            )
-
-            col3.metric(
-                "Budget Used",
-                f"{result['budget_usage'] * 100:.1f}%",
-            )
-
-            st.subheader("Audit Findings")
-
-            findings = result.get("findings", [])
-
-            if findings:
-                for finding in findings:
-                    st.warning(finding)
-            else:
-                st.success("No configured rule-based findings.")
-
-            st.caption(
-                "ML anomaly detected: "
-                + ("Yes" if result["ml_anomaly"] else "No")
-            )
-
-        except (ValueError, TypeError, KeyError) as error:
-            st.error(f"Unable to analyze invoice: {error}")
-
-
-# ==================================================
-# BULK AUDIT
-# ==================================================
-
-elif page == "Bulk Audit":
-    show_header(
-        "Bulk Invoice Audit",
-        "Upload a CSV, score invoices, and export a review-ready report.",
-    )
-
-    st.markdown(
-        '<div class="notice">'
-        "Risk scoring requires the columns: quantity, unit_price, "
-        "market_price, budget, total_amount."
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    uploaded_file = st.file_uploader(
-        "Upload invoice CSV",
-        type=["csv"],
-        help="Choose a procurement transaction CSV file.",
-    )
-
-    if uploaded_file is not None:
-        if st.button(
-            "Run Bulk Audit",
-            use_container_width=True,
-        ):
-            try:
-                with st.spinner(
-                    "Auditing invoices and calculating risk scores..."
-                ):
-                    uploaded_file.seek(0)
-                    report = audit_csv(uploaded_file)
-
-                    if not isinstance(report, pd.DataFrame):
-                        report = pd.DataFrame(report)
-
-                    report = add_risk_scores(report)
-                    save_report(report)
-
-                st.success("Bulk audit completed.")
-
-            except Exception as error:
-                st.error(f"Bulk audit failed: {error}")
-
-    report = st.session_state.get("nigrani_report")
-
-    if report is not None:
-        st.divider()
-
-        show_report_metrics(report)
-        show_risk_chart(report)
-        show_report_table(report, "bulk")
-
-        st.divider()
-        st.subheader("Complete Excel Audit Report")
-
-        st.write(
-            "Download a workbook containing the audit summary, "
-            "invoice details, risk breakdown, and supplier analysis."
-        )
-
-        try:
-            excel_data = create_excel_report(report)
-
-            st.download_button(
-                label="Download Complete Excel Audit Report",
-                data=excel_data,
-                file_name="nigrani_complete_audit_report.xlsx",
-                mime=(
-                    "application/vnd.openxmlformats-officedocument."
-                    "spreadsheetml.sheet"
-                ),
-                key="complete_excel_report",
-                use_container_width=True,
-            )
-
-        except Exception as error:
-            st.error(
-                "Could not create the Excel report. "
-                f"Details: {error}"
-            )
-            st.info(
-                "Install the Excel dependency using: "
-                "python -m pip install openpyxl"
-            )
-
-
-# ==================================================
-# SUPPLIER ANALYTICS
-# ==================================================
-
-elif page == "Supplier Analytics":
-    show_header(
-        "Supplier Analytics",
-        "Compare supplier invoice activity, spending, and review risk.",
-    )
-
-    report = st.session_state.get("nigrani_report")
-
-    if report is None:
-        st.info(
-            "No audit report available. Run a Bulk Audit first."
-        )
-
-    elif "supplier" not in report.columns:
-        st.warning(
-            "The report does not contain a 'supplier' column."
-        )
-
-    else:
-        data = report.copy()
-
-        if "risk_score" in data.columns:
-            data["risk_score"] = pd.to_numeric(
-                data["risk_score"],
-                errors="coerce",
-            )
-        else:
-            data["risk_score"] = float("nan")
-
-        if "total_amount" in data.columns:
-            data["total_amount"] = pd.to_numeric(
-                data["total_amount"],
-                errors="coerce",
-            )
-        else:
-            data["total_amount"] = 0.0
-
-        summary = (
-            data.groupby("supplier", dropna=False)
-            .agg(
-                invoice_count=("supplier", "size"),
-                average_risk=("risk_score", "mean"),
-                total_spending=("total_amount", "sum"),
-                highest_risk=("risk_score", "max"),
-            )
-            .reset_index()
-        )
-
-        flagged_counts = (
-            data.assign(
-                flagged=data["risk_score"].ge(25)
-            )
-            .groupby("supplier", dropna=False)["flagged"]
-            .sum()
-            .reset_index(name="invoices_to_review")
-        )
-
-        summary = summary.merge(
-            flagged_counts,
-            on="supplier",
-            how="left",
-        )
-
-        summary["average_risk"] = summary[
-            "average_risk"
-        ].round(1)
-
-        col1, col2, col3 = st.columns(3)
-
-        col1.metric(
-            "Suppliers",
-            summary["supplier"].nunique(),
-        )
-
-        col2.metric(
-            "Invoices to Review",
-            int(summary["invoices_to_review"].sum()),
-        )
-
-        col3.metric(
-            "Total Invoice Value",
-            money(summary["total_spending"].sum()),
-        )
-
-        st.divider()
-
-        st.subheader("Average Risk by Supplier")
-
-        risk_data = summary.dropna(
-            subset=["average_risk"]
-        ).sort_values(
-            "average_risk",
-            ascending=False,
-        )
-
-        if not risk_data.empty:
-            st.bar_chart(
-                risk_data,
-                x="supplier",
-                y="average_risk",
-            )
-        else:
-            st.info("No valid risk scores are available.")
-
-        st.subheader("Total Spending by Supplier")
-
-        spending_data = summary.sort_values(
-            "total_spending",
-            ascending=False,
-        )
-
-        if not spending_data.empty:
-            st.bar_chart(
-                spending_data,
-                x="supplier",
-                y="total_spending",
-            )
-
-        st.subheader("Supplier Review Summary")
-
+    history = st.session_state.audit_history
+
+    total_checks = len(history)
+    flagged = sum(item["Score"] >= 30 for item in history)
+    high_priority = sum(item["Score"] >= 60 for item in history)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Checks Performed", total_checks)
+    c2.metric("Flagged for Review", flagged)
+    c3.metric("High-Priority Results", high_priority)
+
+    st.subheader("Available Tools")
+
+    cards = [
+        ("🧾 Single Invoice", "Check invoice totals and pricing."),
+        ("🔍 TrustCheck", "Review invoice irregularities."),
+        ("💳 Expense Fraud Detector", "Check expense claims and duplicates."),
+        ("📄 Fake Bill Detector", "Check bill calculations and repeated IDs."),
+        ("🌐 Website Safety", "Screen URLs for suspicious indicators."),
+        ("📊 Bulk Audit", "Review multiple transactions using CSV."),
+        ("🏢 Supplier Analytics", "Summarize spending by supplier."),
+    ]
+
+    cols = st.columns(2)
+    for index, (title, description) in enumerate(cards):
+        with cols[index % 2]:
+            st.markdown(f"**{title}**")
+            st.write(description)
+
+    if history:
+        st.subheader("Recent Checks")
         st.dataframe(
-            summary.sort_values(
-                ["average_risk", "invoices_to_review"],
-                ascending=[False, False],
-                na_position="last",
-            ),
+            pd.DataFrame(history[-10:][::-1]),
             use_container_width=True,
             hide_index=True,
         )
-
+        report = pd.DataFrame(history)
         st.download_button(
-            "Download Supplier Summary",
-            data=summary.to_csv(
-                index=False
-            ).encode("utf-8"),
-            file_name="nigrani_supplier_analytics.csv",
+            "Download Check History (CSV)",
+            data=report.to_csv(index=False).encode("utf-8"),
+            file_name="nigrani_audit_history.csv",
             mime="text/csv",
-            key="supplier_summary_download",
+        )
+    else:
+        st.info("Your check history will appear here after your first check.")
+
+
+# ============================================================
+# 2. SINGLE INVOICE
+# ============================================================
+
+elif page == "Single Invoice":
+    show_header(
+        "Single Invoice Audit",
+        "Check a single invoice against its market price and approved budget.",
+    )
+
+    with st.form("single_invoice_form"):
+        invoice_id = st.text_input("Invoice ID", "INV-001")
+        supplier = st.text_input("Supplier", "ABC Suppliers")
+        quantity = st.number_input("Quantity", min_value=1, value=10)
+        unit_price = st.number_input(
+            "Unit Price (₹)", min_value=0.01, value=100.0
+        )
+        market_price = st.number_input(
+            "Market Price per Unit (₹)", min_value=0.01, value=100.0
+        )
+        budget = st.number_input(
+            "Approved Budget (₹)", min_value=0.01, value=1500.0
+        )
+        claimed_total = st.number_input(
+            "Claimed Invoice Total (₹)", min_value=0.0, value=1000.0
         )
 
-        st.caption(
-            "Higher risk scores indicate review priority, "
-            "not proof of supplier misconduct."
+        submitted = st.form_submit_button("Audit Invoice")
+
+    if submitted:
+        result = calculate_invoice(
+            quantity, unit_price, market_price, budget, claimed_total
+        )
+        st.subheader("Invoice Summary")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Expected Total", money(result["expected_total"]))
+        c2.metric("Claimed Total", money(claimed_total))
+        c3.metric("Difference", money(result["price_difference"]))
+
+        show_result(result["score"], result["findings"])
+        record_audit(
+            "Single Invoice",
+            invoice_id or supplier or "Invoice",
+            result["score"],
+            result["findings"],
         )
 
 
-# ==================================================
-# TRUSTCHECK INVOICE VERIFICATION
-# ==================================================
+# ============================================================
+# 3. TRUSTCHECK
+# ============================================================
 
 elif page == "TrustCheck":
     show_header(
         "TrustCheck",
-        "Verify invoice details and understand why an invoice "
-        "may need further review.",
+        "Run configured invoice checks and highlight potential irregularities.",
     )
 
     st.info(
-        "TrustCheck uses rule-based checks. Its score indicates "
-        "review priority, not the probability of fraud."
+        "This initial version uses rule-based checks, not a trained fraud model."
     )
 
-    with st.form("trustcheck_invoice_form"):
-        st.subheader("Invoice Details")
+    with st.form("trustcheck_form"):
+        invoice_id = st.text_input("Invoice ID", "INV-TEST-001")
+        supplier = st.text_input("Supplier", "ABC Suppliers")
+        material = st.text_input("Material", "Steel")
 
-        col1, col2 = st.columns(2)
-
-        with col1:
-            invoice_id = st.text_input(
-                "Invoice ID",
-                value="INV-TEST-001",
-            )
-
-            supplier = st.text_input(
-                "Supplier",
-                value="ABC Suppliers",
-            )
-
-            material = st.text_input(
-                "Material",
-                value="Steel",
-            )
-
-            quantity = st.number_input(
-                "Quantity",
-                min_value=1,
-                value=10,
-                step=1,
-            )
-
-        with col2:
-            unit_price = st.number_input(
-                "Unit Price (₹)",
-                min_value=0.01,
-                value=100.0,
-                step=10.0,
-            )
-
-            market_price = st.number_input(
-                "Reference Market Price (₹)",
-                min_value=0.01,
-                value=100.0,
-                step=10.0,
-            )
-
-            budget = st.number_input(
-                "Approved Budget (₹)",
-                min_value=0.01,
-                value=1500.0,
-                step=100.0,
-            )
-
-            claimed_total = st.number_input(
-                "Claimed Invoice Total (₹)",
-                min_value=0.0,
-                value=1000.0,
-                step=100.0,
-            )
-
-        submitted = st.form_submit_button(
-            "Run TrustCheck",
-            use_container_width=True,
+        quantity = st.number_input("Quantity", min_value=1, value=10)
+        unit_price = st.number_input(
+            "Unit Price (₹)", min_value=0.01, value=100.0
         )
+        market_price = st.number_input(
+            "Market Price (₹)", min_value=0.01, value=100.0
+        )
+        budget = st.number_input(
+            "Approved Budget (₹)", min_value=0.01, value=1500.0
+        )
+        claimed_total = st.number_input(
+            "Claimed Total (₹)", min_value=0.0, value=1000.0
+        )
+
+        submitted = st.form_submit_button("Run TrustCheck")
 
     if submitted:
-        result = check_invoice(
-            quantity=quantity,
-            unit_price=unit_price,
-            market_price=market_price,
-            budget=budget,
-            claimed_total=claimed_total,
-            invoice_id=invoice_id,
-            supplier=supplier,
-            material=material,
+        result = calculate_invoice(
+            quantity, unit_price, market_price, budget, claimed_total
         )
 
-        st.divider()
-        st.subheader("TrustCheck Results")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Review Score", f"{result['score']}/100")
+        c2.metric(
+            "Status",
+            "High Priority" if result["score"] >= 60
+            else "Needs Review" if result["score"] >= 30
+            else "Basic Checks Passed",
+        )
+        c3.metric("Findings", len(result["findings"]))
 
-        col1, col2, col3 = st.columns(3)
+        st.write(f"**Invoice:** {invoice_id}")
+        st.write(f"**Supplier:** {supplier}")
+        st.write(f"**Material:** {material}")
+        st.write(f"**Calculated Total:** {money(result['expected_total'])}")
 
-        col1.metric(
-            "Review Priority Score",
-            f"{result['trust_score']}/100",
+        show_result(result["score"], result["findings"])
+        record_audit(
+            "TrustCheck",
+            invoice_id or supplier or "Invoice",
+            result["score"],
+            result["findings"],
         )
 
-        col2.metric(
-            "Verification Status",
-            result["status"],
+
+# ============================================================
+# 4. EXPENSE FRAUD DETECTOR
+# ============================================================
+
+elif page == "Expense Fraud Detector":
+    show_header(
+        "Expense Fraud Detector",
+        "Screen expense claims for duplicate references, excessive amounts "
+        "and spending-limit violations.",
+    )
+
+    with st.form("expense_form"):
+        claim_id = st.text_input("Expense / Claim ID", "EXP-001")
+        employee = st.text_input("Employee Name or ID", "EMP-001")
+        category = st.selectbox(
+            "Expense Category",
+            ["Travel", "Food", "Accommodation", "Equipment", "Other"],
         )
-
-        col3.metric(
-            "Review Required",
-            "Yes" if result["review_required"] else "No",
+        amount = st.number_input("Claimed Amount (₹)", min_value=0.0, value=500.0)
+        approved_limit = st.number_input(
+            "Approved Limit (₹)", min_value=0.01, value=1000.0
         )
+        usual_amount = st.number_input(
+            "Usual Amount for This Expense (₹)",
+            min_value=0.0,
+            value=500.0,
+        )
+        submitted = st.form_submit_button("Check Expense")
 
-        st.progress(result["trust_score"] / 100)
+    if submitted:
+        findings = []
+        score = 0
 
-        if result["status"] == "Invalid Data":
-            st.error("Invalid invoice data. Please review the inputs.")
-        elif result["trust_score"] >= 60:
-            st.error("High review priority. Investigate this invoice.")
-        elif result["review_required"]:
-            st.warning("Some checks failed. Further review is recommended.")
-        else:
-            st.success("The invoice passed the configured basic checks.")
+        if not claim_id.strip():
+            findings.append("Claim ID is missing.")
+            score += 30
 
-        st.subheader("Checks Passed")
+        if amount <= 0:
+            findings.append("Claim amount must be greater than zero.")
+            score += 40
 
-        if result["checks_passed"]:
-            for check in result["checks_passed"]:
-                st.write(f"✅ {check}")
-        else:
-            st.write("No checks passed.")
+        if amount > approved_limit:
+            findings.append("Expense exceeds the approved limit.")
+            score += 40
 
-        st.subheader("Findings")
-
-        if result["findings"]:
-            for finding in result["findings"]:
-                st.warning(
-                    f"**{finding['severity']} severity:** "
-                    f"{finding['reason']}"
-                )
-        else:
-            st.success("No configured TrustCheck findings.")
-
-        if "expected_total" in result:
-            st.subheader("Financial Summary")
-
-            col1, col2, col3 = st.columns(3)
-
-            col1.metric(
-                "Expected Total",
-                money(result["expected_total"]),
+        if usual_amount > 0 and amount > usual_amount * 2:
+            findings.append(
+                "Claim is more than twice the stated usual amount."
             )
+            score += 30
 
-            col2.metric(
-                "Claimed Total",
-                money(result["claimed_total"]),
-            )
+        duplicate = any(
+            item["claim_id"].casefold() == claim_id.strip().casefold()
+            and claim_id.strip()
+            for item in st.session_state.expense_claims
+        )
 
-            col3.metric(
-                "Price Difference",
-                money(result["price_difference"]),
+        if duplicate:
+            findings.append(
+                "This claim ID was already submitted in this app session."
             )
+            score += 50
+
+        score = min(score, 100)
+
+        st.subheader("Expense Summary")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Claimed Amount", money(amount))
+        c2.metric("Approved Limit", money(approved_limit))
+        c3.metric("Variance", money(amount - approved_limit))
+
+        show_result(score, findings)
+
+        if claim_id.strip():
+            st.session_state.expense_claims.append({
+                "claim_id": claim_id.strip(),
+                "employee": employee,
+                "category": category,
+                "amount": amount,
+            })
+
+        record_audit(
+            "Expense Fraud Detector",
+            claim_id or employee or "Expense",
+            score,
+            findings,
+        )
+
+
+# ============================================================
+# 5. FAKE BILL DETECTOR
+# ============================================================
+
+elif page == "Fake Bill Detector":
+    show_header(
+        "Fake Bill Detector",
+        "Check bill arithmetic, required details and duplicate bill references.",
+    )
+
+    st.warning(
+        "Arithmetic and field checks cannot establish whether a document "
+        "was genuinely issued. This version does not authenticate bills with issuers."
+    )
+
+    with st.form("fake_bill_form"):
+        bill_id = st.text_input("Bill Number", "BILL-001")
+        issuer = st.text_input("Business / Issuer Name", "ABC Traders")
+        tax_id = st.text_input("Tax ID (if applicable)", "GST-EXAMPLE")
+        description = st.text_input("Item / Service Description", "Office supplies")
+        quantity = st.number_input("Quantity", min_value=1, value=2)
+        unit_price = st.number_input("Unit Price (₹)", min_value=0.0, value=500.0)
+        tax_percent = st.number_input(
+            "Tax Rate (%)", min_value=0.0, max_value=100.0, value=18.0
+        )
+        claimed_total = st.number_input(
+            "Total Printed on Bill (₹)", min_value=0.0, value=1180.0
+        )
+
+        submitted = st.form_submit_button("Verify Bill")
+
+    if submitted:
+        findings = []
+        score = 0
+
+        expected_subtotal = quantity * unit_price
+        expected_tax = expected_subtotal * tax_percent / 100
+        expected_total = expected_subtotal + expected_tax
+
+        if not bill_id.strip():
+            findings.append("Bill number is missing.")
+            score += 25
+
+        if not issuer.strip():
+            findings.append("Issuer name is missing.")
+            score += 25
+
+        if not description.strip():
+            findings.append("Item or service description is missing.")
+            score += 15
+
+        if not tax_id.strip():
+            findings.append("Tax ID was not supplied; verify whether it is required.")
+            score += 10
+
+        if unit_price <= 0:
+            findings.append("Unit price must be greater than zero.")
+            score += 30
+
+        if abs(claimed_total - expected_total) > 1.0:
+            findings.append(
+                f"Printed total differs from the calculated total "
+                f"({money(expected_total)})."
+            )
+            score += 40
+
+        duplicate = any(
+            item["bill_id"].casefold() == bill_id.strip().casefold()
+            and bill_id.strip()
+            for item in st.session_state.bill_records
+        )
+
+        if duplicate:
+            findings.append(
+                "This bill number was already checked in this app session."
+            )
+            score += 40
+
+        score = min(score, 100)
+
+        st.subheader("Bill Calculation")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Subtotal", money(expected_subtotal))
+        c2.metric("Calculated Tax", money(expected_tax))
+        c3.metric("Expected Total", money(expected_total))
+
+        st.metric("Printed Total", money(claimed_total))
+        show_result(score, findings)
+
+        if bill_id.strip():
+            st.session_state.bill_records.append({
+                "bill_id": bill_id.strip(),
+                "issuer": issuer,
+                "description": description,
+                "claimed_total": claimed_total,
+            })
+
+        record_audit(
+            "Fake Bill Detector",
+            bill_id or issuer or "Bill",
+            score,
+            findings,
+        )
+
+
+# ============================================================
+# 6. WEBSITE SAFETY
+# ============================================================
+
+elif page == "Website Safety":
+    show_header(
+        "Website Safety Checker",
+        "Screen a URL for common suspicious patterns before deciding whether to visit.",
+    )
+
+    st.warning(
+        "This is a basic heuristic checker. It does not query threat-intelligence "
+        "databases, inspect website content, or guarantee a website is safe."
+    )
+
+    with st.form("website_safety_form"):
+        website = st.text_input(
+            "Website URL",
+            placeholder="https://example.com",
+        )
+        submitted = st.form_submit_button("Check Website")
+
+    if submitted:
+        score, findings = check_website(website)
+
+        if score >= 60:
+            st.error("High review priority")
+        elif score >= 30:
+            st.warning("Some suspicious indicators were found")
+        elif findings:
+            st.info("Review the findings before proceeding")
+        else:
+            st.success("No configured warning indicators were detected")
+
+        st.metric("URL Risk Indicator Score", f"{score}/100")
+        st.progress(score / 100)
+
+        if findings:
+            for finding in findings:
+                st.warning(finding)
+        elif website.strip():
+            st.success("No configured suspicious patterns were detected.")
+
+        record_audit(
+            "Website Safety",
+            website or "URL",
+            score,
+            findings,
+        )
 
         st.caption(
-            "TrustCheck identifies potential irregularities. "
-            "A human reviewer must determine the appropriate action."
+            "Do not enter passwords, payment details or other sensitive data "
+            "on a website based only on this result."
         )
 
-# ==================================================
-# FOOTER
-# ==================================================
 
-st.markdown(
-    """
-    <div class="footer">
-        Nigrani AI · Procurement Risk Intelligence<br>
-        Prototype for audit assistance — human review is required.
-    </div>
-    """,
-    unsafe_allow_html=True,
+# ============================================================
+# 7. BULK AUDIT
+# ============================================================
+
+elif page == "Bulk Audit":
+    show_header(
+        "Bulk Audit",
+        "Upload a CSV file to screen multiple invoice transactions.",
+    )
+
+    st.write(
+        "Required columns: `invoice_id`, `quantity`, `unit_price`, "
+        "`market_price`, `budget`, `claimed_total`."
+    )
+
+    uploaded = st.file_uploader("Upload transaction CSV", type=["csv"])
+
+    if uploaded is not None:
+        try:
+            df = pd.read_csv(uploaded)
+            df.columns = [column.strip().lower() for column in df.columns]
+
+            required = [
+                "invoice_id", "quantity", "unit_price",
+                "market_price", "budget", "claimed_total",
+            ]
+
+            missing = [column for column in required if column not in df.columns]
+
+            if missing:
+                st.error("Missing required columns: " + ", ".join(missing))
+            else:
+                results = []
+
+                for _, row in df.iterrows():
+                    try:
+                        quantity = float(row["quantity"])
+                        unit_price = float(row["unit_price"])
+                        market_price = float(row["market_price"])
+                        budget = float(row["budget"])
+                        claimed_total = float(row["claimed_total"])
+
+                        result = calculate_invoice(
+                            quantity,
+                            unit_price,
+                            market_price,
+                            budget,
+                            claimed_total,
+                        )
+
+                        results.append({
+                            "invoice_id": str(row["invoice_id"]),
+                            "expected_total": result["expected_total"],
+                            "claimed_total": claimed_total,
+                            "review_score": result["score"],
+                            "status": (
+                                "High Priority" if result["score"] >= 60
+                                else "Needs Review" if result["score"] >= 30
+                                else "Basic Checks Passed"
+                            ),
+                            "findings": "; ".join(result["findings"]),
+                        })
+                    except (TypeError, ValueError, OverflowError):
+                        results.append({
+                            "invoice_id": str(row["invoice_id"]),
+                            "expected_total": None,
+                            "claimed_total": row["claimed_total"],
+                            "review_score": 100,
+                            "status": "Invalid Data",
+                            "findings": "One or more numeric fields are invalid.",
+                        })
+
+                report = pd.DataFrame(results)
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Transactions", len(report))
+                c2.metric(
+                    "Flagged",
+                    int((report["review_score"] >= 30).sum()),
+                )
+                c3.metric(
+                    "High Priority",
+                    int((report["review_score"] >= 60).sum()),
+                )
+
+                st.dataframe(report, use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    "Download Audit Report",
+                    data=report.to_csv(index=False).encode("utf-8"),
+                    file_name="nigrani_bulk_audit.csv",
+                    mime="text/csv",
+                )
+
+                for _, row in report.iterrows():
+                    record_audit(
+                        "Bulk Audit",
+                        str(row["invoice_id"]),
+                        int(row["review_score"]),
+                        [row["findings"]] if row["findings"] else [],
+                    )
+
+        except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as exc:
+            st.error(f"Could not read this CSV file: {exc}")
+
+
+# ============================================================
+# 8. SUPPLIER ANALYTICS
+# ============================================================
+
+elif page == "Supplier Analytics":
+    show_header(
+        "Supplier Analytics",
+        "Analyze transaction totals and spending by supplier using a CSV file.",
+    )
+
+    st.write("Required columns: `supplier` and `claimed_total`.")
+
+    uploaded = st.file_uploader(
+        "Upload supplier transaction CSV",
+        type=["csv"],
+        key="supplier_csv",
+    )
+
+    if uploaded is not None:
+        try:
+            df = pd.read_csv(uploaded)
+            df.columns = [column.strip().lower() for column in df.columns]
+
+            required = ["supplier", "claimed_total"]
+            missing = [column for column in required if column not in df.columns]
+
+            if missing:
+                st.error("Missing required columns: " + ", ".join(missing))
+            else:
+                df["claimed_total"] = pd.to_numeric(
+                    df["claimed_total"], errors="coerce"
+                )
+                df = df.dropna(subset=["supplier", "claimed_total"])
+
+                if df.empty:
+                    st.info("No valid supplier transactions were found.")
+                else:
+                    summary = (
+                        df.groupby("supplier", as_index=False)
+                        .agg(
+                            transaction_count=("claimed_total", "size"),
+                            total_spending=("claimed_total", "sum"),
+                            average_transaction=("claimed_total", "mean"),
+                        )
+                        .sort_values("total_spending", ascending=False)
+                    )
+
+                    c1, c2 = st.columns(2)
+                    c1.metric("Suppliers", len(summary))
+                    c2.metric("Total Spending", money(df["claimed_total"].sum()))
+
+                    st.subheader("Spending by Supplier")
+                    st.bar_chart(
+                        summary.set_index("supplier")["total_spending"]
+                    )
+                    st.dataframe(
+                        summary,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.download_button(
+                        "Download Supplier Summary",
+                        data=summary.to_csv(index=False).encode("utf-8"),
+                        file_name="nigrani_supplier_analytics.csv",
+                        mime="text/csv",
+                    )
+
+        except (UnicodeDecodeError, pd.errors.ParserError, ValueError) as exc:
+            st.error(f"Could not read this CSV file: {exc}")
+
+
+# ============================================================
+# FOOTER
+# ============================================================
+
+st.divider()
+st.caption(
+    "Nigrani AI • Fraud screening and digital safety support • "
+    "Always verify flagged results with reliable evidence."
 )
